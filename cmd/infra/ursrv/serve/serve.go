@@ -683,8 +683,6 @@ func getReport(db *sql.DB, geoip *geoip.Provider) map[string]interface{} {
 			inc(features["Connection"]["v2"], "Discovery, local enabled", rep.Announce.LocalEnabled)
 
 			add(featureGroups["Connection"]["v2"], "Discovery", "Default servers (using DNS)", rep.Announce.DefaultServersDNS)
-			add(featureGroups["Connection"]["v2"], "Discovery", "Default servers (using IP)", rep.Announce.DefaultServersIP)
-			add(featureGroups["Connection"]["v2"], "Discovery", "Other servers", rep.Announce.DefaultServersIP)
 
 			add(featureGroups["Connection"]["v2"], "Relaying", "Default relays", rep.Relays.DefaultServers)
 			add(featureGroups["Connection"]["v2"], "Relaying", "Other relays", rep.Relays.OtherServers)
