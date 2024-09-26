@@ -100,11 +100,14 @@ func (cli *CLI) Run() error {
 		slog.Error("Failed to listen (usage reports)", "error", err)
 		return err
 	}
+	slog.Info("Listening (usage reports)", "address", urListener.Addr())
+
 	internalListener, err := net.Listen("tcp", cli.ListenInternal)
 	if err != nil {
 		slog.Error("Failed to listen (internal)", "error", err)
 		return err
 	}
+	slog.Info("Listening (internal)", "address", internalListener.Addr())
 
 	var geo *geoip.Provider
 	if cli.GeoIPAccountID != 0 && cli.GeoIPLicenseKey != "" {
@@ -184,6 +187,8 @@ func (cli *CLI) Run() error {
 		WriteTimeout: 15 * time.Second,
 		Handler:      mux,
 	}
+
+	slog.Info("Ready to serve")
 	return metricsSrv.Serve(urListener)
 }
 
