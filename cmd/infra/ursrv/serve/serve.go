@@ -161,9 +161,6 @@ resume:
 		gr, err := gzip.NewReader(fd)
 		if err == nil {
 			srv.load(gr)
-		} else {
-			fd.Seek(0, 0)
-			srv.load(fd) // XXX
 		}
 		fd.Close()
 	}
@@ -308,13 +305,17 @@ func (s *server) addReport(rep *contract.Report) bool {
 	if s.geo != nil {
 		if ip := net.ParseIP(rep.Address); ip != nil {
 			if city, err := s.geo.City(ip); err == nil {
-				rep.Country = city.Country.Names["en"]
 				rep.City = city.City.Names["en"]
+				rep.Country = city.Country.Names["en"]
+				rep.CountryCode = city.Country.IsoCode
 			}
 		}
 	}
 	if rep.Country == "" {
 		rep.Country = "Unknown"
+	}
+	if rep.CountryCode == "" {
+		rep.CountryCode = "ZZ"
 	}
 	if rep.City == "" {
 		rep.City = "Unknown"
@@ -322,7 +323,10 @@ func (s *server) addReport(rep *contract.Report) bool {
 
 	rep.Version = transformVersion(rep.Version)
 	if strings.Contains(rep.Version, ".") {
-		rep.MajorVersion = strings.Join(strings.SplitN(rep.Version, ".", 3)[:2], ".")
+		split := strings.SplitN(rep.Version, ".", 3)
+		if len(split) == 3 {
+			rep.MajorVersion = strings.Join(split[:2], ".")
+		}
 	}
 	rep.OS, rep.Arch, _ = strings.Cut(rep.Platform, "-")
 
@@ -366,7 +370,7 @@ func (s *server) load(r io.Reader) {
 			slog.Error("load", "error", err)
 			break
 		}
-		s.reports.Store(rep.UniqueID, &rep)
+		s.addReport(&rep)
 	}
 }
 
