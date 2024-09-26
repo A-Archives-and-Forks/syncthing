@@ -285,7 +285,7 @@ func (s *server) newDataHandler(w http.ResponseWriter, r *http.Request) {
 	lr := &io.LimitedReader{R: r.Body, N: 40 * 1024}
 	bs, _ := io.ReadAll(lr)
 	if err := json.Unmarshal(bs, &rep); err != nil {
-		log.Error("json decode", "error", err)
+		log.Error("Failed to decode JSON", "error", err)
 		http.Error(w, "JSON Decode Error", http.StatusInternalServerError)
 		return
 	}
@@ -295,7 +295,7 @@ func (s *server) newDataHandler(w http.ResponseWriter, r *http.Request) {
 	rep.Address = addr
 
 	if err := rep.Validate(); err != nil {
-		log.Error("validate", "error", err)
+		log.Error("Failed to validate report", "error", err)
 		http.Error(w, "Validation Error", http.StatusInternalServerError)
 		return
 	}
