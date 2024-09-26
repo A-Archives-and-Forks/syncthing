@@ -176,7 +176,8 @@ func (cli *CLI) Run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	mux.HandleFunc("/newdata", srv.newDataHandler)
+	mux.HandleFunc("/newdata", srv.handleNewData)
+	mux.HandleFunc("/ping", srv.handlePing)
 
 	metricsSrv := http.Server{
 		ReadTimeout:  5 * time.Second,
@@ -248,7 +249,10 @@ type server struct {
 	reports *xsync.MapOf[string, *contract.Report]
 }
 
-func (s *server) newDataHandler(w http.ResponseWriter, r *http.Request) {
+func (s *server) handlePing(w http.ResponseWriter, r *http.Request) {
+}
+
+func (s *server) handleNewData(w http.ResponseWriter, r *http.Request) {
 	result := "fail"
 	defer func() {
 		// result is "accept" (new report), "replace" (existing report) or
@@ -367,6 +371,7 @@ func (s *server) save(w io.Writer) error {
 
 func (s *server) load(r io.Reader) {
 	dec := json.NewDecoder(r)
+	s.reports.Clear()
 	for {
 		var rep contract.Report
 		if err := dec.Decode(&rep); errors.Is(err, io.EOF) {
@@ -377,6 +382,7 @@ func (s *server) load(r io.Reader) {
 		}
 		s.addReport(&rep)
 	}
+	slog.Info("Loaded reports", "count", s.reports.Size())
 }
 
 var (
