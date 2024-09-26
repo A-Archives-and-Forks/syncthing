@@ -200,7 +200,7 @@ func New() *Report {
 
 func (r *Report) Validate() error {
 	if r.UniqueID == "" || r.Version == "" || r.Platform == "" {
-		return errors.New("missing required field")
+		return errors.New("missing required field (uniqueID=" + r.UniqueID + ", version=" + r.Version + ", platform=" + r.Platform + ")")
 	}
 	if len(r.Date) != 8 {
 		return errors.New("date not initialized")
