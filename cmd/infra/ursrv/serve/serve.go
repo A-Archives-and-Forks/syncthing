@@ -258,6 +258,11 @@ func (s *server) newDataHandler(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	addr := r.Header.Get("X-Forwarded-For")
 	if addr != "" {
 		addr = strings.Split(addr, ", ")[0]
