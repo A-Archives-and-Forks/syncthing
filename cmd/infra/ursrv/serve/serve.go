@@ -11,6 +11,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,11 +33,11 @@ import (
 )
 
 type CLI struct {
-	Listen          string        `env:"UR_LISTEN_METRICS" help:"Usage reporting & metrics endpoint listen address" default:"0.0.0.0:8080"`
+	Listen          string        `env:"UR_LISTEN" help:"Usage reporting & metrics endpoint listen address" default:"0.0.0.0:8080"`
 	ListenInternal  string        `env:"UR_LISTEN_INTERNAL" help:"Internal metrics endpoint listen address" default:"0.0.0.0:8082"`
 	GeoIPLicenseKey string        `env:"UR_GEOIP_LICENSE_KEY"`
 	GeoIPAccountID  int           `env:"UR_GEOIP_ACCOUNT_ID"`
-	DumpFile        string        `env:"UR_DUMP_FILE" default:"reports.jsons"`
+	DumpFile        string        `env:"UR_DUMP_FILE" default:"reports.jsons.gz"`
 	DumpInterval    time.Duration `env:"UR_DUMP_INTERVAL" default:"5m"`
 
 	S3Endpoint    string `name:"s3-endpoint" hidden:"true" env:"UR_S3_ENDPOINT"`
@@ -90,18 +91,18 @@ type distributionMatch struct {
 }
 
 func (cli *CLI) Run() error {
-	slog.Info("starting", "version", build.Version)
+	slog.Info("Starting", "version", build.Version)
 
 	// Listening
 
-	internalListener, err := net.Listen("tcp", cli.ListenInternal)
+	urListener, err := net.Listen("tcp", cli.Listen)
 	if err != nil {
-		slog.Error("listen", "error", err)
+		slog.Error("Failed to listen (usage reports)", "error", err)
 		return err
 	}
-	metricsListener, err := net.Listen("tcp", cli.Listen)
+	internalListener, err := net.Listen("tcp", cli.ListenInternal)
 	if err != nil {
-		slog.Error("listen", "error", err)
+		slog.Error("Failed to listen (internal)", "error", err)
 		return err
 	}
 
@@ -109,7 +110,7 @@ func (cli *CLI) Run() error {
 	if cli.GeoIPAccountID != 0 && cli.GeoIPLicenseKey != "" {
 		geo, err = geoip.NewGeoLite2CityProvider(context.Background(), cli.GeoIPAccountID, cli.GeoIPLicenseKey, os.TempDir())
 		if err != nil {
-			slog.Error("geoip", "error", err)
+			slog.Error("Failed to load GeoIP", "error", err)
 			return err
 		}
 		go geo.Serve(context.TODO())
@@ -121,34 +122,16 @@ func (cli *CLI) Run() error {
 	if cli.S3Endpoint != "" {
 		s3sess, err = s3.NewSession(cli.S3Endpoint, cli.S3Region, cli.S3Bucket, cli.S3AccessKeyID, cli.S3SecretKey)
 		if err != nil {
-			slog.Error("s3", "error", err)
+			slog.Error("Failed to create S3 session", "error", err)
 			return err
 		}
 	}
 
 	if _, err := os.Stat(cli.DumpFile); err != nil && s3sess != nil {
-		latestKey, err := s3sess.LatestKey()
-		if err != nil {
-			slog.Error("latest key", "error", err)
-			goto resume
+		if err := cli.downloadDumpFile(s3sess); err != nil {
+			slog.Error("Failed to download dump file", "error", err)
 		}
-		fd, err := os.Create(cli.DumpFile)
-		if err != nil {
-			slog.Error("creating dump file", "error", err)
-			goto resume
-		}
-		if err := s3sess.Download(fd, latestKey); err != nil {
-			slog.Error("downloading dump file", "error", err)
-			_ = fd.Close()
-			goto resume
-		}
-		if err := fd.Close(); err != nil {
-			slog.Error("closing dump file", "error", err)
-			goto resume
-		}
-		slog.Info("dump file downloaded", "key", latestKey)
 	}
-resume:
 
 	// server
 
@@ -167,47 +150,8 @@ resume:
 
 	go func() {
 		for range time.Tick(cli.DumpInterval) {
-			fd, err := os.Create(cli.DumpFile + ".tmp")
-			if err != nil {
-				slog.Error("creating dump file", "error", err)
-				continue
-			}
-			gw := gzip.NewWriter(fd)
-			if err := srv.save(gw); err != nil {
-				slog.Error("saving dump file", "error", err)
-				continue
-			}
-			if err := gw.Close(); err != nil {
-				slog.Error("closing gzip writer", "error", err)
-				fd.Close()
-				continue
-			}
-			if err := fd.Close(); err != nil {
-				slog.Error("closing dump file", "error", err)
-				continue
-			}
-			if err := os.Rename(cli.DumpFile+".tmp", cli.DumpFile); err != nil {
-				slog.Error("renaming dump file", "error", err)
-				continue
-			}
-			slog.Info("dump file saved")
-
-			if s3sess != nil {
-				key := fmt.Sprintf("reports-%s.jsons.gz", time.Now().UTC().Format("2006-01-02"))
-				fd, err := os.Open(cli.DumpFile)
-				if err != nil {
-					slog.Error("opening dump file", "error", err)
-					continue
-				}
-				if err := s3sess.Upload(fd, key); err != nil {
-					slog.Error("uploading dump file", "error", err)
-					continue
-				}
-				if err := fd.Close(); err != nil {
-					slog.Error("closing dump file", "error", err)
-					continue
-				}
-				slog.Info("dump file uploaded")
+			if err := cli.saveDumpFile(srv, s3sess); err != nil {
+				slog.Error("Failed to write dump file", "error", err)
 			}
 		}
 	}()
@@ -239,7 +183,64 @@ resume:
 		WriteTimeout: 15 * time.Second,
 		Handler:      mux,
 	}
-	return metricsSrv.Serve(metricsListener)
+	return metricsSrv.Serve(urListener)
+}
+
+func (cli *CLI) downloadDumpFile(s3sess *s3.Session) error {
+	latestKey, err := s3sess.LatestKey()
+	if err != nil {
+		return fmt.Errorf("list latest S3 key: %w", err)
+	}
+	fd, err := os.Create(cli.DumpFile)
+	if err != nil {
+		return fmt.Errorf("create dump file: %w", err)
+	}
+	if err := s3sess.Download(fd, latestKey); err != nil {
+		_ = fd.Close()
+		return fmt.Errorf("download dump file: %w", err)
+	}
+	if err := fd.Close(); err != nil {
+		return fmt.Errorf("close dump file: %w", err)
+	}
+	slog.Info("Dump file downloaded", "key", latestKey)
+	return nil
+}
+
+func (cli *CLI) saveDumpFile(srv *server, s3sess *s3.Session) error {
+	fd, err := os.Create(cli.DumpFile + ".tmp")
+	if err != nil {
+		return fmt.Errorf("creating dump file: %w", err)
+	}
+	gw := gzip.NewWriter(fd)
+	if err := srv.save(gw); err != nil {
+		return fmt.Errorf("saving dump file: %w", err)
+	}
+	if err := gw.Close(); err != nil {
+		fd.Close()
+		return fmt.Errorf("closing gzip writer: %w", err)
+	}
+	if err := fd.Close(); err != nil {
+		return fmt.Errorf("closing dump file: %w", err)
+	}
+	if err := os.Rename(cli.DumpFile+".tmp", cli.DumpFile); err != nil {
+		return fmt.Errorf("renaming dump file: %w", err)
+	}
+	slog.Info("Dump file saved")
+
+	if s3sess != nil {
+		key := fmt.Sprintf("reports-%s.jsons.gz", time.Now().UTC().Format("2006-01-02"))
+		fd, err := os.Open(cli.DumpFile)
+		if err != nil {
+			return fmt.Errorf("opening dump file: %w", err)
+		}
+		if err := s3sess.Upload(fd, key); err != nil {
+			return fmt.Errorf("uploading dump file: %w", err)
+		}
+		_ = fd.Close()
+		slog.Info("Dump file uploaded")
+	}
+
+	return nil
 }
 
 type server struct {
@@ -360,14 +361,13 @@ func (s *server) save(w io.Writer) error {
 }
 
 func (s *server) load(r io.Reader) {
-	br := bufio.NewReader(r)
-	dec := json.NewDecoder(br)
+	dec := json.NewDecoder(r)
 	for {
 		var rep contract.Report
-		if err := dec.Decode(&rep); err == io.EOF {
+		if err := dec.Decode(&rep); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
-			slog.Error("load", "error", err)
+			slog.Error("Failed to load record", "error", err)
 			break
 		}
 		s.addReport(&rep)
